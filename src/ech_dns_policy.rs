@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const CLOUDFLARE_ECH_QUERY_NAME: &str = "cloudflare-ech.com";
-const BUILTIN_DOMAINS: [&str; 2] = ["linux.do", "ldstatic.com"];
+const BUILTIN_DOMAINS: [&str; 1] = ["nodeloc.com"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EchDnsPolicy {
@@ -98,7 +98,7 @@ mod tests {
                 " Example.COM. ".into(),
                 "bad/path.com".into(),
                 "127.0.0.1".into(),
-                "cdn.linux.do".into(),
+                "cdn.nodeloc.com".into(),
             ],
         }
         .normalized();
@@ -113,9 +113,26 @@ mod tests {
             "example.com.evil.net"
         );
         policy.enabled = false;
-        for host in ["linux.do", "cdn.ldstatic.com", "cdn.example.com"] {
+        for host in ["nodeloc.com", "cdn.nodeloc.com", "cdn.example.com"] {
             assert_eq!(policy.query_name(host), host);
         }
         assert_eq!(policy.custom_domains, vec!["example.com"]);
+    }
+
+    #[test]
+    fn builtin_site_domain_gets_ech_query_name() {
+        let policy = EchDnsPolicy {
+            enabled: true,
+            custom_domains: vec![],
+        };
+        // 站点根域与其子域都应命中 ECH 查询名（换站后必须同步内置域）
+        assert_eq!(policy.query_name("nodeloc.com"), CLOUDFLARE_ECH_QUERY_NAME);
+        assert_eq!(
+            policy.query_name("www.nodeloc.com"),
+            CLOUDFLARE_ECH_QUERY_NAME
+        );
+        // 旧站域名不再命中
+        assert_eq!(policy.query_name("linux.do"), "linux.do");
+        assert_eq!(policy.query_name("cdn.ldstatic.com"), "cdn.ldstatic.com");
     }
 }

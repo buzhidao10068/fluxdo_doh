@@ -6,7 +6,7 @@
 
 - **DOH DNS 解析**：通过 HTTPS 加密 DNS 查询，防止 DNS 污染
 - **ECH 支持**：加密 TLS 握手中的 SNI 字段（需要服务器支持）
-- **公共 ECH 入口（可关闭）**：默认对 `linux.do`、`ldstatic.com` 及其子域名生效，可添加自定义目标域名；匹配域名的 A、AAAA、HTTPS 查询统一使用 `cloudflare-ech.com`，由所选 DoH 获取入口地址和 ECH 配置；TLS 仍使用真实目标域名并校验证书。其他域名按原名解析，手动指定的服务端 IP 仍优先。
+- **公共 ECH 入口（可关闭）**：默认对 `nodeloc.com` 及其子域名生效，可添加自定义目标域名；匹配域名的 A、AAAA、HTTPS 查询统一使用 `cloudflare-ech.com`，由所选 DoH 获取入口地址和 ECH 配置；TLS 仍使用真实目标域名并校验证书。其他域名按原名解析，手动指定的服务端 IP 仍优先。
 - **多 DOH 服务器**：支持 Cloudflare、Canadian Shield、Google、Quad9、DNSPod、腾讯 DNS、阿里 DNS
 - **跨平台**：支持 Windows、macOS、Linux、Android、iOS
 
@@ -272,7 +272,7 @@ Rust `ProxyConfig.ech_dns_policy` 和独立程序 `--ech-dns-policy` 接受 `{"e
 cargo test --locked --features ech
 ```
 
-公网冒烟测试默认忽略，显式运行时验证所选 DoH、真实 `linux.do` 证书、`EchStatus::Accepted` 及 Cloudflare 返回的 `sni=encrypted`：
+公网冒烟测试默认忽略，显式运行时验证所选 DoH、真实 `nodeloc.com` 证书、`EchStatus::Accepted` 及 Cloudflare 返回的 `sni=encrypted`：
 
 ```bash
 FLUXDO_ECH_DOH_URL=https://dns.alidns.com/dns-query \

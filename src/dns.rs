@@ -62,13 +62,10 @@ mod ech_query_tests {
     #[test]
     fn only_forum_domains_use_public_ech_entry() {
         for host in [
-            "linux.do",
-            "www.linux.do",
-            "a.b.linux.do",
-            "LINUX.DO.",
-            "ldstatic.com",
-            "cdn.ldstatic.com",
-            "CDN.LDSTATIC.COM.",
+            "nodeloc.com",
+            "www.nodeloc.com",
+            "a.b.nodeloc.com",
+            "NODELOC.COM.",
         ] {
             assert_eq!(
                 EchDnsPolicy::default().query_name(host),
@@ -78,9 +75,9 @@ mod ech_query_tests {
         }
         for host in [
             "",
-            "notlinux.do",
-            "linux.do.example.com",
-            "evil-ldstatic.com",
+            "notnodeloc.com",
+            "nodeloc.com.example.com",
+            "linux.do",
             "challenges.cloudflare.com",
             "cloudflare-ech.com",
             "example.com.",
@@ -108,7 +105,7 @@ mod ech_query_tests {
         )
         .await
         .unwrap();
-        a.record_host_success("linux.do", "192.0.2.10".parse().unwrap());
+        a.record_host_success("nodeloc.com", "192.0.2.10".parse().unwrap());
         let b = DnsResolver::shared_with_policy(
             "https://127.0.0.1/dns-query",
             None,
@@ -210,7 +207,7 @@ mod ech_query_tests {
         resolver.force_doh_get_ip = true;
         resolver.force_doh_get_ech = true;
 
-        let result = resolver.lookup_host("linux.do", false).await.unwrap();
+        let result = resolver.lookup_host("nodeloc.com", false).await.unwrap();
         assert!(result.addrs.contains(&"192.0.2.10".parse().unwrap()));
         assert_eq!(result.ech_config.unwrap().as_ref(), &[0, 3, 1, 2, 3]);
         assert!(result.ttl <= Duration::from_secs(120));
@@ -224,18 +221,18 @@ mod ech_query_tests {
             types.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
             vec![RecordType::A, RecordType::AAAA, RecordType::HTTPS]
         );
-        assert!(resolver.ip_cache.read().contains_key("linux.do"));
-        assert!(resolver.ech_cache.read().contains_key("linux.do"));
+        assert!(resolver.ip_cache.read().contains_key("nodeloc.com"));
+        assert!(resolver.ech_cache.read().contains_key("nodeloc.com"));
 
-        resolver.record_host_success("linux.do", "192.0.2.10".parse().unwrap());
+        resolver.record_host_success("nodeloc.com", "192.0.2.10".parse().unwrap());
         assert!(resolver
-            .lookup_host("linux.do", false)
+            .lookup_host("nodeloc.com", false)
             .await
             .unwrap()
             .preferred_ip
             .is_some());
         assert_eq!(queries.lock().await.len(), 3);
-        resolver.lookup_host("linux.do", true).await.unwrap();
+        resolver.lookup_host("nodeloc.com", true).await.unwrap();
         assert_eq!(queries.lock().await.len(), 6);
 
         let unrelated = resolver.lookup_host("example.com", false).await.unwrap();
@@ -255,11 +252,11 @@ mod ech_query_tests {
             .iter()
             .all(|(name, _)| name == "cloudflare-ech.com."));
         resolver.ech_dns_policy.enabled = false;
-        let normal = resolver.lookup_host("linux.do", true).await.unwrap();
+        let normal = resolver.lookup_host("nodeloc.com", true).await.unwrap();
         assert!(normal.addrs.contains(&"192.0.2.11".parse().unwrap()));
         assert!(queries.lock().await[12..15]
             .iter()
-            .all(|(name, _)| name == "linux.do."));
+            .all(|(name, _)| name == "nodeloc.com."));
         server.abort();
     }
 }

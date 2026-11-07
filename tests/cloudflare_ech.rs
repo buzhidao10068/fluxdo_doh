@@ -13,7 +13,7 @@ async fn domestic_doh_accepts_forum_ech() {
     let url = std::env::var("FLUXDO_ECH_DOH_URL")
         .unwrap_or_else(|_| "https://dns.alidns.com/dns-query".to_string());
     let resolver = Arc::new(DnsResolver::new(&url, None, false, None).await.unwrap());
-    let result = resolver.lookup_host("linux.do", false).await.unwrap();
+    let result = resolver.lookup_host("nodeloc.com", false).await.unwrap();
     println!(
         "DoH={url}, IPs={:?}, ECH bytes={}",
         result.addrs,
@@ -26,12 +26,12 @@ async fn domestic_doh_accepts_forum_ech() {
     assert!(!result.addrs.is_empty());
     assert!(result.ech_config.is_some());
     let connector = DohTlsConnector::new(Some(resolver), true, Duration::from_secs(10), None, None);
-    let mut stream = connector.connect("linux.do", 443).await.unwrap();
+    let mut stream = connector.connect("nodeloc.com", 443).await.unwrap();
     let status = stream.get_ref().1.ech_status();
-    println!("linux.do ECH status: {status:?}");
+    println!("nodeloc.com ECH status: {status:?}");
     assert_eq!(status, EchStatus::Accepted);
     stream
-        .write_all(b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: linux.do\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: nodeloc.com\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
     let mut response = Vec::new();
