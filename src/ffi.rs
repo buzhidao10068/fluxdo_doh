@@ -9,9 +9,73 @@ use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
-static SERVER: std::sync::OnceLock<Arc<RwLock<Option<Arc<DohProxyServer>>>>> =
-    std::sync::OnceLock::new();
+static SERVER: std::sync::OnceLock<Arc<RwLock<Option<RunningServer>>>> = std::sync::OnceLock::new();
 static PORT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+struct RunningServer {
+    server: Arc<DohProxyServer>,
+    task: tokio::task::JoinHandle<crate::error::Result<()>>,
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn stop_releases_listener_before_return_and_same_port_can_restart() {
+        let config = ProxyConfig {
+            enable_doh: false,
+            ..Default::default()
+        };
+        let port = start_server_with_config(config.clone());
+        assert!(port > 0);
+        for _ in 0..20 {
+            assert_eq!(doh_proxy_is_running(), 1);
+            doh_proxy_stop();
+            assert_eq!(doh_proxy_is_running(), 0);
+            let probe = TcpListener::bind(("127.0.0.1", port as u16))
+                .expect("停止返回后必须能立即重新绑定原端口");
+            // 绑定失败不能遗留新的监听任务，释放占用后必须允许重试。
+            assert_eq!(
+                start_server_with_config(ProxyConfig {
+                    bind_port: port as u16,
+                    ..config.clone()
+                }),
+                -1
+            );
+            assert_eq!(doh_proxy_is_running(), 0);
+            drop(probe);
+            assert_eq!(
+                start_server_with_config(ProxyConfig {
+                    bind_port: port as u16,
+                    ..config.clone()
+                }),
+                port
+            );
+        }
+        doh_proxy_stop();
+    }
+
+    #[tokio::test]
+    async fn stop_before_serve_subscription_is_retained() {
+        let server = DohProxyServer::new(ProxyConfig {
+            enable_doh: false,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let listener = server.bind_listener().await.unwrap();
+        let port = server.port().unwrap();
+        server.stop();
+        tokio::time::timeout(std::time::Duration::from_secs(1), server.serve(listener))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.port(), None);
+        let _probe = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    }
+}
 
 fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
@@ -22,7 +86,7 @@ fn get_runtime() -> &'static Runtime {
     })
 }
 
-fn get_server_holder() -> &'static Arc<RwLock<Option<Arc<DohProxyServer>>>> {
+fn get_server_holder() -> &'static Arc<RwLock<Option<RunningServer>>> {
     SERVER.get_or_init(|| Arc::new(RwLock::new(None)))
 }
 
@@ -148,70 +212,67 @@ pub extern "C" fn doh_proxy_start(port: c_int, prefer_ipv6: c_int) -> c_int {
 
 fn start_server_with_config(config: ProxyConfig) -> c_int {
     let rt = get_runtime();
-
-    // Create the server
-    let server = match rt.block_on(async { DohProxyServer::new(config).await }) {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            tracing::error!("Failed to create DOH proxy server: {}", e);
+    rt.block_on(async {
+        // 启停共用锁，旧监听任务退出前不能覆盖句柄或启动下一代代理。
+        let mut guard = get_server_holder().write().await;
+        if !stop_current_server(&mut guard).await {
             return -1;
         }
-    };
-
-    // Store the server
-    let server_holder = get_server_holder();
-    let server_clone = server.clone();
-    rt.block_on(async {
-        let mut guard = server_holder.write().await;
-        *guard = Some(server);
-    });
-
-    // Start server in background
-    rt.spawn(async move {
-        if let Err(e) = server_clone.start().await {
-            tracing::error!("DOH proxy server error: {}", e);
-        }
-    });
-
-    // Wait a bit for server to bind
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // Get the actual port
-    let actual_port = rt.block_on(async {
-        let guard = server_holder.read().await;
-        if let Some(ref server) = *guard {
-            server.port().unwrap_or(0) as c_int
-        } else {
-            0
-        }
-    });
-
-    if actual_port > 0 {
+        let server = match DohProxyServer::new(config).await {
+            Ok(server) => Arc::new(server),
+            Err(error) => {
+                tracing::error!("Failed to create DOH proxy server: {}", error);
+                return -1;
+            }
+        };
+        let listener = match server.bind_listener().await {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!("Failed to bind DOH proxy: {}", error);
+                return -1;
+            }
+        };
+        let actual_port = server.port().unwrap_or(0) as c_int;
         PORT.store(actual_port, std::sync::atomic::Ordering::SeqCst);
+        let server_clone = server.clone();
+        let task = rt.spawn(async move {
+            let result = server_clone.serve(listener).await;
+            // serve 返回前已释放监听 socket，之后才允许状态查询返回停止。
+            PORT.store(0, std::sync::atomic::Ordering::SeqCst);
+            result
+        });
+        *guard = Some(RunningServer { server, task });
         tracing::info!("DOH proxy started on port {}", actual_port);
         actual_port
-    } else {
-        tracing::error!("Failed to get DOH proxy port");
-        -1
+    })
+}
+
+async fn stop_current_server(holder: &mut Option<RunningServer>) -> bool {
+    if let Some(running) = holder.as_mut() {
+        running.server.stop();
+        match tokio::time::timeout(std::time::Duration::from_secs(3), &mut running.task).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(result) => tracing::error!("DOH proxy task exited with error: {:?}", result),
+            Err(_) => {
+                // 超时保留句柄和运行状态，后续停止可继续等待，不能假报成功。
+                tracing::error!("Timed out waiting for DOH proxy listener to stop");
+                return false;
+            }
+        }
     }
+    *holder = None;
+    PORT.store(0, std::sync::atomic::Ordering::SeqCst);
+    true
 }
 
 /// Stop the DOH proxy server
 #[no_mangle]
 pub extern "C" fn doh_proxy_stop() {
     let rt = get_runtime();
-    let server_holder = get_server_holder();
-
     rt.block_on(async {
-        let mut guard = server_holder.write().await;
-        if let Some(ref server) = *guard {
-            server.stop();
-            tracing::info!("DOH proxy stopped");
-        }
-        *guard = None;
+        let mut guard = get_server_holder().write().await;
+        stop_current_server(&mut guard).await;
     });
-
-    PORT.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Check if the DOH proxy is running
@@ -512,7 +573,9 @@ pub extern "C" fn doh_proxy_dns_cache_stats() -> *mut c_char {
         let current_stats = {
             let server_holder = get_server_holder();
             let guard = server_holder.read().await;
-            guard.as_ref().map(|server| server.dns_cache_stats())
+            guard
+                .as_ref()
+                .map(|running| running.server.dns_cache_stats())
         };
         if let Some(stats) = current_stats {
             stats
@@ -550,7 +613,9 @@ pub extern "C" fn doh_proxy_dns_cache_records() -> *mut c_char {
         let current_records = {
             let server_holder = get_server_holder();
             let guard = server_holder.read().await;
-            guard.as_ref().map(|server| server.dns_cache_records())
+            guard
+                .as_ref()
+                .map(|running| running.server.dns_cache_records())
         };
         if let Some(records) = current_records {
             records

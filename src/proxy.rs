@@ -26,7 +26,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
@@ -37,7 +37,7 @@ pub struct DohProxyServer {
     doh_tls_connector: Arc<DohTlsConnector>,
     cert_manager: Option<Arc<CertManager>>,
     local_addr: Arc<RwLock<Option<SocketAddr>>>,
-    shutdown_tx: broadcast::Sender<()>,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl DohProxyServer {
@@ -91,7 +91,7 @@ impl DohProxyServer {
         } else {
             None
         };
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let (shutdown_tx, _) = watch::channel(false);
 
         Ok(Self {
             config,
@@ -122,6 +122,11 @@ impl DohProxyServer {
 
     /// Start the proxy server
     pub async fn start(&self) -> Result<()> {
+        self.serve(self.bind_listener().await?).await
+    }
+
+    // FFI 先完成绑定再报告启动成功，避免用固定延时推测就绪。
+    pub(crate) async fn bind_listener(&self) -> Result<TcpListener> {
         let bind_addr = format!("{}:{}", self.config.bind_addr, self.config.bind_port);
         let listener = TcpListener::bind(&bind_addr).await?;
 
@@ -129,11 +134,20 @@ impl DohProxyServer {
         *self.local_addr.write() = Some(local_addr);
 
         info!("Local proxy server listening on {}", local_addr);
+        Ok(listener)
+    }
 
+    pub(crate) async fn serve(&self, listener: TcpListener) -> Result<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        loop {
+        // 保留先于任务调度发出的停止信号，避免订阅前的停止请求丢失。
+        while !*shutdown_rx.borrow_and_update() {
             tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => {
+                    info!("Shutting down proxy server");
+                    break;
+                }
                 result = listener.accept() => {
                     match result {
                         Ok((stream, peer_addr)) => {
@@ -176,19 +190,17 @@ impl DohProxyServer {
                         }
                     }
                 }
-                _ = shutdown_rx.recv() => {
-                    info!("Shutting down proxy server");
-                    break;
-                }
             }
         }
 
+        drop(listener);
+        *self.local_addr.write() = None;
         Ok(())
     }
 
     /// Stop the proxy server
     pub fn stop(&self) {
-        let _ = self.shutdown_tx.send(());
+        self.shutdown_tx.send_replace(true);
     }
 }
 
